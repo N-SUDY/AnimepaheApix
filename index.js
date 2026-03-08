@@ -23,13 +23,15 @@ app.get('/', (req, res) => {
       search: '/search?q=naruto',
       episodes: '/episodes?session=anime-session-id',
       sources: '/sources?anime_session=xxx&episode_session=yyy',
-      m3u8: '/m3u8?url=kwik-url',
-      proxy: '/proxy?url=m3u8-or-ts-url (Use this to play videos)',
+      m3u8: '/m3u8?url=kwik-url (returns m3u8 URL with required referer)',
+      proxy: '/proxy?url=m3u8-or-ts-url&referer=kwik-referer (Use this to play videos)',
       health: '/health'
     },
     usage: {
       note: 'Use /proxy endpoint to stream videos through the server to bypass CORS and referrer restrictions',
-      example: 'Get M3U8 URL from /m3u8, then use /proxy?url=<m3u8-url> in your video player'
+      step1: 'Get M3U8 URL and referer from /m3u8 endpoint',
+      step2: 'Use the returned proxy_url directly, or use /proxy?url=<m3u8-url>&referer=<referer> in your video player',
+      example: '/m3u8 returns { m3u8: "...", referer: "https://kwik.si/", proxy_url: "/proxy?url=..." }'
     }
   });
 });
@@ -88,8 +90,18 @@ app.get('/m3u8', async (req, res) => {
     if (!url) {
       return res.status(400).json({ error: 'Query parameter "url" is required' });
     }
-    const m3u8 = await pahe.resolveKwikWithNode(url);
-    res.json({ m3u8 });
+    const result = await pahe.resolveKwikWithNode(url);
+    
+    // Return m3u8 URL along with required referer for CORS bypass
+    res.json({
+      m3u8: result.m3u8,
+      referer: result.referer,
+      headers: {
+        'Referer': result.referer,
+        'Origin': result.origin
+      },
+      proxy_url: `/proxy?url=${encodeURIComponent(result.m3u8)}&referer=${encodeURIComponent(result.referer)}`
+    });
   } catch (error) {
     console.error('M3U8 resolution error:', error);
     res.status(500).json({ error: error.message });
@@ -98,20 +110,20 @@ app.get('/m3u8', async (req, res) => {
 
 app.get('/proxy', async (req, res) => {
   try {
-    const { url } = req.query;
+    const { url, referer: customReferer } = req.query;
     if (!url) {
       return res.status(400).json({ 
         error: 'Query parameter "url" is required',
-        usage: 'GET /proxy?url=<m3u8-or-ts-url>',
-        example: '/proxy?url=https://example.com/video.m3u8'
+        usage: 'GET /proxy?url=<m3u8-or-ts-url>&referer=<optional-referer>',
+        example: '/proxy?url=https://example.com/video.m3u8&referer=https://kwik.si/'
       });
     }
 
     const axios = require('axios');
     
-    // Extract domain from URL for referer
+    // Use custom referer if provided, otherwise extract from URL
     const urlObj = new URL(url);
-    const referer = `${urlObj.protocol}//${urlObj.host}/`;
+    const referer = customReferer || `${urlObj.protocol}//${urlObj.host}/`;
     
     // Fetch the content with proper headers
     const response = await axios.get(url, {
@@ -155,15 +167,16 @@ app.get('/proxy', async (req, res) => {
       
       // Replace relative URLs with proxied absolute URLs
       const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
+      const refererParam = customReferer ? `&referer=${encodeURIComponent(customReferer)}` : '';
       content = content.split('\n').map(line => {
         line = line.trim();
         if (line && !line.startsWith('#') && !line.startsWith('http')) {
           // Relative URL - make it absolute and proxy it
           const absoluteUrl = baseUrl + line;
-          return `/proxy?url=${encodeURIComponent(absoluteUrl)}`;
+          return `/proxy?url=${encodeURIComponent(absoluteUrl)}${refererParam}`;
         } else if (line.startsWith('http')) {
           // Absolute URL - proxy it
-          return `/proxy?url=${encodeURIComponent(line)}`;
+          return `/proxy?url=${encodeURIComponent(line)}${refererParam}`;
         }
         return line;
       }).join('\n');
