@@ -142,9 +142,19 @@ app.get('/proxy', async (req, res) => {
       });
     }
 
+    // Automatically resolve Kwik URLs
+    if (url.includes('kwik.cx/e/') || url.includes('kwik.si/e/') || url.match(/kwik\.[a-z]+\/e\//)) {
+      try {
+        const result = await pahe.resolveKwikWithNode(url);
+        const redirectUrl = `/proxy?url=${encodeURIComponent(result.m3u8)}&referer=${encodeURIComponent(result.referer)}`;
+        return res.redirect(302, redirectUrl);
+      } catch (e) {
+        console.error('Failed to auto-resolve Kwik URL:', e);
+        return res.status(500).json({ error: 'Failed to resolve Kwik URL', details: e.message });
+      }
+    }
+
     const axios = require('axios');
-    
-    // Use custom referer if provided, otherwise extract from URL
     const urlObj = new URL(url);
     const referer = customReferer || `${urlObj.protocol}//${urlObj.host}/`;
     
@@ -162,83 +172,72 @@ app.get('/proxy', async (req, res) => {
         'Sec-Fetch-Mode': 'cors',
         'Sec-Fetch-Site': 'cross-site'
       },
-      responseType: 'arraybuffer',
+      responseType: 'stream',
       timeout: 30000,
       maxRedirects: 5,
       validateStatus: function (status) {
-        return status >= 200 && status < 500; // Accept 4xx errors to handle them
+        return status >= 200 && status < 500;
       }
     });
 
-    // Check if we got blocked
     if (response.status === 403) {
       return res.status(403).json({ 
         error: 'Access forbidden - CDN blocked the request',
-        suggestion: 'The video CDN is blocking server requests. Try using a browser extension or different source.',
         url: url
       });
     }
 
-    // Determine content type
     const contentType = response.headers['content-type'] || 
                        (url.includes('.m3u8') ? 'application/vnd.apple.mpegurl' : 
                         url.includes('.ts') ? 'video/mp2t' : 'application/octet-stream');
 
-    // If it's an m3u8 playlist, modify URLs to go through proxy
     if (contentType.includes('mpegurl') || url.includes('.m3u8')) {
-      let content = response.data.toString('utf-8');
-      
-      // Replace relative URLs with proxied absolute URLs
-      const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
-      const refererParam = customReferer ? `&referer=${encodeURIComponent(customReferer)}` : '';
-      content = content.split('\n').map(line => {
-        line = line.trim();
-        if (line && !line.startsWith('#') && !line.startsWith('http')) {
-          // Relative URL - make it absolute and proxy it
-          const absoluteUrl = baseUrl + line;
-          return `/proxy?url=${encodeURIComponent(absoluteUrl)}${refererParam}`;
-        } else if (line.startsWith('http')) {
-          // Absolute URL - proxy it
-          return `/proxy?url=${encodeURIComponent(line)}${refererParam}`;
-        }
-        return line;
-      }).join('\n');
+      let content = '';
+      response.data.on('data', chunk => { content += chunk.toString(); });
+      response.data.on('end', () => {
+        const baseUrl = url.substring(0, url.lastIndexOf('/') + 1);
+        const refererParam = customReferer ? `&referer=${encodeURIComponent(customReferer)}` : '';
+        const modified = content.split('\n').map(line => {
+          const t = line.trim();
+          if (t.startsWith('#')) {
+            // Rewrite URIs in tags like #EXT-X-KEY:METHOD=AES-128,URI="..."
+            if (t.includes('URI="')) {
+              return t.replace(/URI="([^"]+)"/, (match, uri) => {
+                let fullUrl = uri;
+                if (!uri.startsWith('http')) {
+                  fullUrl = baseUrl + uri;
+                }
+                return `URI="/proxy?url=${encodeURIComponent(fullUrl)}${refererParam}"`;
+              });
+            }
+            return line;
+          } else if (t && !t.startsWith('http')) {
+            return `/proxy?url=${encodeURIComponent(baseUrl + t)}${refererParam}`;
+          } else if (t.startsWith('http')) {
+            return `/proxy?url=${encodeURIComponent(t)}${refererParam}`;
+          }
+          return line;
+        }).join('\n');
 
-      res.setHeader('Content-Type', contentType);
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
-      res.send(content);
+        res.setHeader('Content-Type', contentType);
+        res.setHeader('Access-Control-Allow-Origin', '*');
+        res.send(modified);
+      });
     } else {
-      // Video segment or other binary content
       res.setHeader('Content-Type', contentType);
       res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Range, Content-Type');
       res.setHeader('Accept-Ranges', 'bytes');
+      if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
+      if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range']);
       
-      if (response.headers['content-length']) {
-        res.setHeader('Content-Length', response.headers['content-length']);
-      }
-      
-      res.send(Buffer.from(response.data));
+      res.status(response.status);
+      response.data.pipe(res);
     }
   } catch (error) {
-    console.error('Proxy error:', error.message);
-    
     if (error.response && error.response.status === 403) {
-      return res.status(403).json({ 
-        error: 'Access forbidden - CDN blocked the request',
-        suggestion: 'The video CDN has Cloudflare protection. You may need to use a CORS proxy service or browser extension.',
-        url: req.query.url
-      });
+      return res.status(403).json({ error: 'Access forbidden - CDN blocked the request' });
     }
-    
-    res.status(500).json({ 
-      error: error.message,
-      url: req.query.url,
-      suggestion: 'Try accessing the M3U8 URL directly in your browser or use a CORS proxy service'
-    });
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -268,3 +267,8 @@ if (require.main === module) {
     console.log(`Animepahe API server running on port ${PORT}`);
   });
 }
+
+
+
+
+
