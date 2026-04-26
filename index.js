@@ -30,6 +30,7 @@ app.get('/', (req, res) => {
     endpoints: {
       search: '/search?q=naruto',
       episodes: '/episodes?session=anime-session-id',
+      latest: '/latest?page=1',
       sources: '/sources?anime_session=xxx&episode_session=yyy',
       ids: '/ids?session=anime-session-id (returns AniList and MyAnimeList IDs)',
       m3u8: '/m3u8?url=kwik-url (returns m3u8 URL with required referer)',
@@ -77,12 +78,23 @@ app.get('/episodes', async (req, res) => {
   }
 });
 
+app.get('/latest', async (req, res) => {
+  try {
+    const page = parseInt(req.query.page, 10) || 1;
+    const latest = await pahe.getLatest(page);
+    res.json(latest);
+  } catch (error) {
+    console.error('Latest error:', error);
+    res.status(mapErrorToStatusCode(error.message)).json({ error: error.message });
+  }
+});
+
 app.get('/sources', async (req, res) => {
   try {
     const { anime_session, episode_session } = req.query;
     if (!anime_session || !episode_session) {
-      return res.status(400).json({ 
-        error: 'Query parameters "anime_session" and "episode_session" are required' 
+      return res.status(400).json({
+        error: 'Query parameters "anime_session" and "episode_session" are required'
       });
     }
     const sources = await pahe.getSources(anime_session, episode_session);
@@ -114,7 +126,7 @@ app.get('/m3u8', async (req, res) => {
       return res.status(400).json({ error: 'Query parameter "url" is required' });
     }
     const result = await pahe.resolveKwikWithNode(url);
-    
+
     // Return m3u8 URL along with required referer for CORS bypass
     res.json({
       m3u8: result.m3u8,
@@ -135,7 +147,7 @@ app.get('/proxy', async (req, res) => {
   try {
     const { url, referer: customReferer } = req.query;
     if (!url) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Query parameter "url" is required',
         usage: 'GET /proxy?url=<m3u8-or-ts-url>&referer=<optional-referer>',
         example: '/proxy?url=https://example.com/video.m3u8&referer=https://kwik.si/'
@@ -157,7 +169,7 @@ app.get('/proxy', async (req, res) => {
     const axios = require('axios');
     const urlObj = new URL(url);
     const referer = customReferer || `${urlObj.protocol}//${urlObj.host}/`;
-    
+
     // Fetch the content with proper headers
     const response = await axios.get(url, {
       headers: {
@@ -181,14 +193,14 @@ app.get('/proxy', async (req, res) => {
     });
 
     if (response.status === 403) {
-      return res.status(403).json({ 
+      return res.status(403).json({
         error: 'Access forbidden - CDN blocked the request',
         url: url
       });
     }
 
-    const contentType = response.headers['content-type'] || 
-                       (url.includes('.m3u8') ? 'application/vnd.apple.mpegurl' : 
+    const contentType = response.headers['content-type'] ||
+                       (url.includes('.m3u8') ? 'application/vnd.apple.mpegurl' :
                         url.includes('.ts') ? 'video/mp2t' : 'application/octet-stream');
 
     if (contentType.includes('mpegurl') || url.includes('.m3u8')) {
@@ -229,7 +241,7 @@ app.get('/proxy', async (req, res) => {
       res.setHeader('Accept-Ranges', 'bytes');
       if (response.headers['content-length']) res.setHeader('Content-Length', response.headers['content-length']);
       if (response.headers['content-range']) res.setHeader('Content-Range', response.headers['content-range']);
-      
+
       res.status(response.status);
       response.data.pipe(res);
     }
@@ -252,9 +264,9 @@ app.options('/proxy', (req, res) => {
 // Global error handler
 app.use((err, req, res, next) => {
   console.error('Unhandled error:', err);
-  res.status(500).json({ 
+  res.status(500).json({
     error: 'Internal server error',
-    message: err.message 
+    message: err.message
   });
 });
 
@@ -266,9 +278,4 @@ if (require.main === module) {
   app.listen(PORT, () => {
     console.log(`Animepahe API server running on port ${PORT}`);
   });
-}
-
-
-
-
-
+      }
